@@ -30,6 +30,17 @@ Coordinate space: x right, y up; pixel (px, py) covers
 
 from __future__ import annotations
 
+from .boolean import (
+    DIFFERENCE,
+    INTERSECTION,
+    UNION,
+    BooleanResult,
+    boolean_difference,
+    boolean_intersection,
+    boolean_op_raw,
+    boolean_union,
+    signed_area,
+)
 from .core import (
     SUBSAMPLES,
     CoverageResult,
@@ -54,17 +65,25 @@ __all__ = [
     "MAX_CANVAS",
     "MAX_CONTOURS",
     "MAX_COORD_ABS",
-    "CoverageResult",
+    "BooleanResult",
     "Contour",
+    "DIFFERENCE",
+    "INTERSECTION",
     "InvalidInputError",
     "Line",
     "Point",
     "Quad",
+    "UNION",
     "WindingFillError",
+    "boolean_difference",
+    "boolean_intersection",
+    "boolean_op_raw",
+    "boolean_union",
     "build_contour",
     "parse_contours",
     "rasterize",
     "rasterize_raw",
+    "signed_area",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
