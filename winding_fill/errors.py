@@ -28,3 +28,27 @@ class InvalidInputError(WindingFillError, ValueError):
         super().__init__(text)
         self.location = location
         self.message = message
+
+
+class SelfIntersectionError(WindingFillError, ValueError):
+    """Raised when a boolean operation receives a non-simple contour.
+
+    Boolean set operations (union/intersection/difference) require each
+    input contour to be a simple Jordan curve: non-adjacent edges must not
+    touch or cross, and adjacent edges may only meet at their common
+    endpoint.  The rasterizer itself has no such restriction -- this error
+    is only raised by the boolean CSG entry points.
+
+    As with :class:`InvalidInputError`, ``location`` pinpoints the contour
+    (and, when known, the offending segment pair) and ``message`` gives
+    the geometric reason.
+    """
+
+    def __init__(self, location: str, message: str = ""):
+        if message:
+            text = f"{location}: {message}"
+        else:
+            text = location
+        super().__init__(text)
+        self.location = location
+        self.message = message

@@ -30,13 +30,29 @@ Coordinate space: x right, y up; pixel (px, py) covers
 
 from __future__ import annotations
 
+from .boolean import (
+    DIFFERENCE,
+    INTERSECTION,
+    UNION,
+    BooleanResult,
+    boolean,
+    boolean_raw,
+    difference,
+    intersection,
+    polygon_area,
+    union,
+)
 from .core import (
     SUBSAMPLES,
     CoverageResult,
     rasterize,
     rasterize_raw,
 )
-from .errors import InvalidInputError, WindingFillError
+from .errors import (
+    InvalidInputError,
+    SelfIntersectionError,
+    WindingFillError,
+)
 from .geometry import (
     MAX_CANVAS,
     MAX_CONTOURS,
@@ -54,17 +70,27 @@ __all__ = [
     "MAX_CANVAS",
     "MAX_CONTOURS",
     "MAX_COORD_ABS",
-    "CoverageResult",
+    "BooleanResult",
     "Contour",
+    "DIFFERENCE",
+    "INTERSECTION",
     "InvalidInputError",
     "Line",
     "Point",
     "Quad",
+    "SelfIntersectionError",
+    "UNION",
     "WindingFillError",
+    "boolean",
+    "boolean_raw",
     "build_contour",
+    "difference",
+    "intersection",
     "parse_contours",
+    "polygon_area",
     "rasterize",
     "rasterize_raw",
+    "union",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

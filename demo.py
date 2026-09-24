@@ -22,10 +22,15 @@ import time
 
 from winding_fill import (
     InvalidInputError,
+    SelfIntersectionError,
     WindingFillError,
+    boolean,
     build_contour,
+    difference,
+    intersection,
     rasterize,
     rasterize_raw,
+    union,
 )
 
 # 17 gray steps for coverage levels 0..16 (k/16).
@@ -146,9 +151,93 @@ def rejection_boundary() -> None:
     print()
 
 
+def _print_mask(title, result_or_levels, width, height) -> None:
+    if hasattr(result_or_levels, "levels"):
+        levels = result_or_levels.levels
+    else:
+        levels = result_or_levels
+    print(title)
+    for py in range(height - 1, -1, -1):
+        print("    " + "".join(_shade(levels[py][px]) for px in range(width)))
+    print()
+
+
+def boolean_demo() -> None:
+    print("=== exact boolean set operations (nonzero winding preserved) ===")
+    width, height = 11, 10
+
+    # A: right triangle (1,1)-(7,1)-(1,7), area 18.  Its hypotenuse is
+    # the line x + y = 8.
+    tri = build_contour([(1, 1), (7, 1), (1, 7)])
+    # B: axis-aligned square [3,9] x [3,9], area 36.
+    box = build_contour([(3, 3), (9, 3), (9, 9), (3, 9)])
+
+    # Hand computation: overlap is the small triangle x,y >= 3, x+y <= 8
+    # with vertices (3,3),(5,3),(3,5) -> area 2.  Hence union area is
+    # 18 + 36 - 2 = 52 and tri \\ box is 18 - 2 = 16.
+    u = union(tri, box)
+    i = intersection(tri, box)
+    d = difference(tri, box)
+    print(
+        "operands: triangle area 18, square area 36; hand-computed "
+        "overlap is triangle area 2\n"
+    )
+    print(f"union          exact area {u.area} (= 52 expected), "
+          f"{len(u.contours)} boundary loop(s)")
+    print(f"intersection   exact area {i.area} (= 2 expected), "
+          f"{len(i.contours)} boundary loop(s)")
+    print(f"difference     exact area {d.area} (= 16 expected), "
+          f"{len(d.contours)} boundary loop(s)\n")
+
+    # The intersection loop keeps the genuinely rational-free but
+    # slanted clipped edge; rasterize each result through the SAME
+    # nonzero-winding pipeline used for raw glyphs.
+    _print_mask("union (rasterized, nonzero winding):",
+                u.rasterize(width, height), width, height)
+    _print_mask("intersection (rasterized):",
+                i.rasterize(width, height), width, height)
+    _print_mask("triangle minus square (rasterized):",
+                d.rasterize(width, height), width, height)
+
+    # Boundary case: two squares touching at exactly one vertex.  The
+    # union must keep two separate loops (area 9 + 9 = 18) and the
+    # intersection must be the empty set, not a degenerate sliver.
+    low = build_contour([(0, 0), (3, 0), (3, 3), (0, 3)])
+    high = build_contour([(3, 3), (6, 3), (6, 6), (3, 6)])
+    tu = union(low, high)
+    ti = intersection(low, high)
+    print("boundary (point tangency at one vertex):")
+    print(f"  union area {tu.area} over {len(tu.contours)} loops "
+          "(18 over 2 expected)")
+    print(f"  intersection is empty: {ti.is_empty}, "
+          f"contours={len(ti.contours)}, area={ti.area}\n")
+
+    # Real rejection: a self-intersecting contour is refused before any
+    # result is built, with a locatable operand-side path.
+    bowtie = build_contour([(0, 0), (4, 4), (4, 0), (0, 4)])
+    try:
+        union(bowtie, high)
+    except SelfIntersectionError as exc:
+        print(f"  rejected self-intersecting operand -> "
+              f"{type(exc).__name__}: {exc}")
+        print(f"  error location token -> {exc.location!r}")
+    else:  # pragma: no cover - defensive, must never happen
+        raise AssertionError("self-intersecting input was not rejected")
+
+    # Curved contours are outside this iteration's contract.
+    curved = build_contour([(0, 0), (4, 0), (4, 4), (0, 4)],
+                           quads=((0, 2, -1),))
+    try:
+        boolean(curved, high, "union")
+    except InvalidInputError as exc:
+        print(f"  rejected quadratic operand -> {type(exc).__name__}: {exc}")
+    print()
+
+
 def main() -> None:
     normal_result()
     rejection_boundary()
+    boolean_demo()
     print("demo finished successfully.")
 
 
