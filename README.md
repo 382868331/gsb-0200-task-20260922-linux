@@ -6,7 +6,15 @@
 winding（非零环绕）** 规则决定每个子样本是否被覆盖，输出 17 级灰度覆盖值
 （k/16, k=0..16）并允许逐子样本查询有符号环绕数。
 
+本轮新增**精确灰度覆盖入口**（`rasterize_area` / `rasterize_area_raw`）：
+对**多边形（纯线段）轮廓**，像素值不再是 4×4 子采样近似，而是单位方格内
+非零环绕区域的**精确有理面积**（`fractions.Fraction`），支持自交轮廓与
+相互重叠的多轮廓，绕两圈的区域只算一次，边正好落在像素边界上时只按面积
+计、没有额外线宽；输出一个可指定原点（允许负坐标）的小窗口。
+
 全部核心算法从零实现，**不调用任何字体/绘图库或第三方同类实现**。
+
+当前版本：**1.1.0**（`winding_fill.__version__`）。
 
 ## 运行环境
 
@@ -14,14 +22,27 @@ winding（非零环绕）** 规则决定每个子样本是否被覆盖，输出 
 - Linux 原生运行，**无需安装任何第三方依赖**，无需网络 / 账号 / 密钥 /
   硬件 / 数据库 / 中间件 / 云 API / Docker。
 
+## venv 准备（可选；本库只用标准库，不安装任何包）
+
+```bash
+python3.14 -m venv .venv          # 或任何 >= 3.10 的 python3
+.venv/bin/python -m pip --version # 不需要 pip install 任何东西
+```
+
+以下命令中的 `python` 均可换成 `.venv/bin/python`；仓库根目录的 `.venv`
+符号链接即按此方式准备。
+
 ## 准确命令
 
 ```bash
-# 必要测试（46 个），全部离线、确定性
+# 必要测试（67 个），全部离线、确定性
 python -m unittest discover -s tests -v
 
-# 固定输入演示（约 0.04 秒；远低于题面约 8 秒的预算）
+# 固定输入演示：4×4 子采样灰度（约 0.04 秒）
 python demo.py
+
+# 本轮新增演示：精确有理面积灰度（约 0.02 秒；预算 90 秒）
+python demo_iteration.py
 ```
 
 ## 公开接口
@@ -31,9 +52,12 @@ from winding_fill import (
     Point, Line, Quad, Contour,      # 不可变数据结构（frozen dataclass）
     build_contour,                  # 顶点链 -> Contour 的便捷构造器
     parse_contours,                 # 原始 dict 数据 -> Contour（严格校验）
-    rasterize,                      # Contour 列表 -> CoverageResult
+    rasterize,                      # Contour 列表 -> CoverageResult（4×4 子采样）
     rasterize_raw,                  # 校验 + 栅格化一步完成
     CoverageResult,                 # 结果对象
+    rasterize_area,                 # 精确有理面积灰度（多边形轮廓）
+    rasterize_area_raw,             # 校验 + 精确面积栅格化一步完成
+    AreaCoverageResult,             # 精确面积结果对象
     InvalidInputError, WindingFillError,
     SUBSAMPLES,      # = 4（契约常量）
     MAX_CONTOURS,    # = 20
@@ -79,6 +103,31 @@ from winding_fill import (
 
 子样本 `(i,j)` 位于
 `(px+(2i+1)/8, py+(2j+1)/8)`（像素中心 4×4 网格）。
+
+### 精确面积灰度（本轮新增）
+
+```python
+result = rasterize_area(contours, width, height, origin=(ox, oy))
+result = rasterize_area_raw(raw_contours, width, height, origin=(ox, oy))
+```
+
+- `contours`：1..20 条已校验的 `Contour`，**只允许线段**（多边形轮廓）；
+  含二次 Bézier 时抛 `InvalidInputError`（请改用 `rasterize`）。
+- `width`/`height`：整数 1..64（`bool` 拒绝）；`origin` 为整数 `(ox, oy)`
+  二元组（`bool` 拒绝，允许负数），指定窗口左下角像素；窗口不得超出
+  坐标上限 ±1024。
+- 结果 `AreaCoverageResult`：
+  - `areas[py][px]`：`Fraction`，像素 `(px, py)` 单位方格内非零环绕区域
+    的**精确面积**，恒在 `[0, 1]`；`py=0` 为窗口底部一行。
+  - `area_at(px, py) -> Fraction`：同上，带下标校验。
+  - `coverage_at(px, py) -> float`：精确面积的 float 视图。
+  - `total_area() -> Fraction`：窗口内所有像素面积之和。
+- 语义：环绕数 ≠ 0 的区域被覆盖；环绕 +2/−2 的区域**只算一次**（不会更
+  亮）；自交轮廓、相互重叠的多轮廓都按非零环绕的数学定义处理；边正好
+  落在像素边界上时只按面积计，没有额外线宽。
+- 精确性：坐标取输入 int/float 的**精确二进制有理值**，全部运算用
+  `fractions.Fraction`，无超采样、无容差；像素面积与窗口裁剪后填充面积
+  在测试中与独立参考**完全相等**。
 
 ## 输入上限与错误语义（接口边界）
 
@@ -140,6 +189,9 @@ from winding_fill import (
 - 仅实现本题契约的数学子集：线段 + 二次 Bézier；**不支持**三次及以上
   Bézier、圆弧、可变子采样率（固定 4×4）、子像素平移 hinting、
   anti-alias 滤波（覆盖率就是盒子滤波的 k/16）、奇偶(even-odd)规则。
+- 精确面积入口（`rasterize_area*`）**只接受线段**（多边形轮廓），不支持
+  二次 Bézier——曲线求交无法保持纯有理运算；曲边输入请用 4×4 子采样的
+  `rasterize`。
 - 不宣称与任何行业标准（TrueType/OpenType scan-converter、SVG、
   D 算法细节、Porter-Duff 合成等）完整兼容；只对本文档描述的契约负责。
 - 不做几何自交清洗：自交轮廓按 nonzero winding 的数学定义直接得到结果
@@ -154,10 +206,14 @@ winding_fill/__init__.py     # 公开 API
 winding_fill/errors.py       # 异常类型
 winding_fill/geometry.py     # 数据结构、严格校验、构造器
 winding_fill/core.py         # 核心：单调拆分、半开 y、nonzero 栅格化
+winding_fill/area.py         # 本轮新增：精确有理面积灰度（多边形轮廓）
 demo.py                      # 固定输入演示（洞 + 重叠 + 拒绝边界）
+demo_iteration.py            # 本轮新增演示：精确面积灰度 + 边界结果
 tests/test_validation.py     # 输入/错误语义/上限测试
 tests/test_algorithm.py      # 与独立参考逐子样本对比及规则测试
+tests/test_area.py           # 本轮新增：手算面积用例 + 独立参考对照
 tests/independent_reference.py  # Fraction / Decimal 独立参考（不导入核心）
+tests/area_reference.py      # 本轮新增：精确面积独立参考（不导入核心）
 ```
 
 ## 演示说明
@@ -166,3 +222,11 @@ tests/independent_reference.py  # Fraction / Decimal 独立参考（不导入核
 矩形 + CW 曲边洞），打印灰度图与 4 个固定子样本环绕数（普通区域 +1、
 重叠区域 +2、洞内 0、外部 0），并实际触发两类拒绝：NaN 坐标
 （定位到具体字段）与 `bool` 冒充整数画布宽度。无 sleep、无预录结果。
+
+`python demo_iteration.py` 真实计算本轮新增的精确面积入口：一个跨负坐标
+窗口内的斜边多边形字形（CCW 斜四边形外框 + 与其重叠的 CCW 矩形 + CW
+三角洞），打印精确灰度图与精确总面积（`Fraction`），并展示三组边界
+结果——边正好落在像素边界上（无额外线宽）、自交蝴蝶结（每个触及像素
+恰为 1/2）、同一轮廓绕两圈（面积不翻倍）；最后实际触发两类拒绝：曲边
+轮廓进入纯线段精确入口、`bool` 冒充整数窗口原点。全程约 0.02 秒，无
+sleep、无预录结果。

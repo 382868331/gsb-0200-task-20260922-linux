@@ -30,6 +30,11 @@ Coordinate space: x right, y up; pixel (px, py) covers
 
 from __future__ import annotations
 
+from .area import (
+    AreaCoverageResult,
+    rasterize_area,
+    rasterize_area_raw,
+)
 from .core import (
     SUBSAMPLES,
     CoverageResult,
@@ -54,6 +59,7 @@ __all__ = [
     "MAX_CANVAS",
     "MAX_CONTOURS",
     "MAX_COORD_ABS",
+    "AreaCoverageResult",
     "CoverageResult",
     "Contour",
     "InvalidInputError",
@@ -64,7 +70,9 @@ __all__ = [
     "build_contour",
     "parse_contours",
     "rasterize",
+    "rasterize_area",
+    "rasterize_area_raw",
     "rasterize_raw",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
