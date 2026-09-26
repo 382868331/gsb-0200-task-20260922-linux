@@ -36,6 +36,7 @@ from .core import (
     rasterize,
     rasterize_raw,
 )
+from .area import AreaResult, fill_area, fill_area_raw
 from .errors import InvalidInputError, WindingFillError
 from .geometry import (
     MAX_CANVAS,
@@ -54,6 +55,7 @@ __all__ = [
     "MAX_CANVAS",
     "MAX_CONTOURS",
     "MAX_COORD_ABS",
+    "AreaResult",
     "CoverageResult",
     "Contour",
     "InvalidInputError",
@@ -62,9 +64,11 @@ __all__ = [
     "Quad",
     "WindingFillError",
     "build_contour",
+    "fill_area",
+    "fill_area_raw",
     "parse_contours",
     "rasterize",
     "rasterize_raw",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

@@ -299,3 +299,119 @@ def reference_levels_mixed(raw_contours, width: int, height: int):
             per_j[j] = hits
         rows_by_py[py] = per_j
     return _assemble(rows_by_py, width, height, decimal=True)
+
+
+# ---------------------------------------------------------------------------
+# Exact clipped nonzero-winding area (whole-window reference)
+# ---------------------------------------------------------------------------
+#
+# Independent of winding_fill.area: instead of clipping edges into each
+# pixel, the whole window rectangle is decomposed into vertical slabs at
+# every critical x (segment endpoints + pairwise intersections), each
+# slab is cut into bands by the edges crossing it, and bands whose
+# midpoint has nonzero winding contribute their exact trapezoid area.
+# Everything is fractions.Fraction arithmetic.
+
+
+def _ref_segments(polygons):
+    segs = []
+    for poly in polygons:
+        n = len(poly)
+        for i in range(n):
+            x0, y0 = poly[i]
+            x1, y1 = poly[(i + 1) % n]
+            a = (Fraction(x0), Fraction(y0))
+            b = (Fraction(x1), Fraction(y1))
+            if a != b:
+                segs.append((a, b))
+    return segs
+
+
+def _ref_winding(segs, x, y):
+    winding = 0
+    for (ax, ay), (bx, by) in segs:
+        span = _span_and_dir(ay, by)
+        if span is None:
+            continue
+        lo, hi, direction = span
+        if lo <= y < hi:
+            xc = ax + (y - ay) * (bx - ax) / (by - ay)
+            if xc >= x:
+                winding += direction
+    return winding
+
+
+def _ref_intersect_x(s1, s2):
+    (ax, ay), (bx, by) = s1
+    (cx, cy), (dx, dy) = s2
+    rx, ry = bx - ax, by - ay
+    sx, sy = dx - cx, dy - cy
+    den = rx * sy - ry * sx
+    if den == 0:
+        return None
+    t = ((cx - ax) * sy - (cy - ay) * sx) / den
+    u = ((cx - ax) * ry - (cy - ay) * rx) / den
+    if 0 < t < 1 and 0 < u < 1:
+        return ax + t * rx
+    return None
+
+
+def reference_clipped_area(polygons, left, bottom, width, height):
+    """Exact area of the nonzero-winding region inside a window rect.
+
+    polygons: list of vertex rings, each a list of (x, y) number pairs
+    (implicitly closed).  The window is the rectangle
+    [left, left+width] x [bottom, bottom+height].  Returns a Fraction.
+    """
+    segs = _ref_segments(polygons)
+    x0, x1 = Fraction(left), Fraction(left + width)
+    y0, y1 = Fraction(bottom), Fraction(bottom + height)
+
+    critical = {x0, x1}
+    for (ax, ay), (bx, by) in segs:
+        for v in (ax, bx):
+            if x0 < v < x1:
+                critical.add(v)
+        # x where the segment crosses the window's horizontal borders:
+        # the band structure changes there as well.
+        if ay != by:
+            for yb in (y0, y1):
+                lo, hi = (ay, by) if ay < by else (by, ay)
+                if lo < yb < hi:
+                    v = ax + (yb - ay) * (bx - ax) / (by - ay)
+                    if x0 < v < x1:
+                        critical.add(v)
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            v = _ref_intersect_x(segs[i], segs[j])
+            if v is not None and x0 < v < x1:
+                critical.add(v)
+    xs = sorted(critical)
+
+    def y_at(seg, x):
+        (ax, ay), (bx, by) = seg
+        return ay + (x - ax) * (by - ay) / (bx - ax)
+
+    total = Fraction(0)
+    for xa, xb in zip(xs, xs[1:]):
+        if xa == xb:
+            continue
+        xm = (xa + xb) / 2
+        # y values where edges cross the vertical line x = xm, clipped
+        # to the window's y range.
+        ys = [y0, y1]
+        for seg in segs:
+            (ax, _), (bx, _) = seg
+            if ax == bx:
+                continue
+            lo, hi = (ax, bx) if ax < bx else (bx, ax)
+            if lo <= xm <= hi:
+                v = y_at(seg, xm)
+                if y0 < v < y1:
+                    ys.append(v)
+        ys = sorted(set(ys))
+        for ylo, yhi in zip(ys, ys[1:]):
+            ymid = (ylo + yhi) / 2
+            if _ref_winding(segs, xm, ymid) != 0:
+                total += (xb - xa) * (yhi - ylo)
+    return total

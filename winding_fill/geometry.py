@@ -19,6 +19,7 @@ tests and the demo).
 from __future__ import annotations
 
 import math
+import numbers
 from dataclasses import dataclass
 from typing import List
 
@@ -39,8 +40,10 @@ MAX_COORD_ABS = 16 * MAX_CANVAS
 class Point:
     """An immutable 2-D point.
 
-    Coordinates are stored as :class:`float` internally but every finite
-    real value accepted by the JSON-ish input layer is permitted.
+    Coordinates given as ``int``/``float`` are stored as :class:`float`;
+    :class:`fractions.Fraction` coordinates are stored exactly so the
+    rational area entry point (:mod:`winding_fill.area`) can compute with
+    exact rational arithmetic.
     """
 
     x: float
@@ -82,6 +85,20 @@ class Contour:
 
 def _coordinate(v: object, where: str) -> float:
     """Validate one coordinate and return it as a plain float."""
+    if isinstance(v, numbers.Rational) and not isinstance(v, bool):
+        if isinstance(v, int):
+            f = float(v)
+            if abs(f) > MAX_COORD_ABS:
+                raise InvalidInputError(
+                    where, f"coordinate {f!r} exceeds limit |x| <= {MAX_COORD_ABS}"
+                )
+            return f
+        # fractions.Fraction: keep the exact rational value.
+        if abs(v) > MAX_COORD_ABS:
+            raise InvalidInputError(
+                where, f"coordinate {v!r} exceeds limit |x| <= {MAX_COORD_ABS}"
+            )
+        return v
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         raise InvalidInputError(
             where, f"expected a real number, got {type(v).__name__}"
