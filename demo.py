@@ -21,6 +21,7 @@ import math
 import time
 
 from winding_fill import (
+    EVEN_ODD_RULE,
     InvalidInputError,
     WindingFillError,
     build_contour,
@@ -55,8 +56,10 @@ def normal_result() -> None:
     )
     hole_rev = _reverse_contour(hole)
 
+    contours = [outer, overlap, hole_rev]
     t0 = time.perf_counter()
-    result = rasterize([outer, overlap, hole_rev], width, height)
+    result = rasterize(contours, width, height)
+    eo = rasterize(contours, width, height, rule=EVEN_ODD_RULE)
     elapsed = time.perf_counter() - t0
 
     print(f"=== nonzero-winding fill: {width}x{height} canvas, 4x4 sub-samples ===")
@@ -91,6 +94,28 @@ def normal_result() -> None:
     assert all(w == 2 for w in overlap_pixel), overlap_pixel
     assert result.coverage_at(6, 5) == 0.0
     assert result.coverage_at(2, 6) == 1.0
+
+    print(f"=== even-odd (alternating) fill, identical crossing data ===")
+    print("    " + "".join(str(x % 10) for x in range(width)))
+    for py in range(height - 1, -1, -1):
+        row = "".join(_shade(eo.levels[py][px]) for px in range(width))
+        print(f"{py:2d}  {row}")
+    print("legend: ' '=0/16 ... '@'=16/16 covered\n")
+    # The two rules share the exact same signed windings.
+    assert eo.windings == result.windings
+    # Differences on this glyph:
+    #  * outer+overlap strip: winding +2 -> nonzero filled, parity empty;
+    #  * the curved hole: the inner contour runs CW (winding 0) but
+    #    parity toggles once there, so it stays a hole either way.
+    assert result.coverage_at(11, 6) == 1.0
+    assert eo.coverage_at(11, 6) == 0.0
+    assert eo.coverage_at(6, 5) == 0.0
+    # single-cover region stays covered under both rules
+    assert eo.coverage_at(2, 6) == 1.0
+    print("  outer+overlap pixel (11,6): nonzero=1.000, even-odd=0.000 "
+          "(winding +2 toggles twice)")
+    print("  hole pixel (6,5): both 0.000; outer-only pixel (2,6): both 1.000")
+    print(f"  both maps computed in {elapsed * 1000:.1f} ms\n")
 
 
 def _reverse_contour(contour):

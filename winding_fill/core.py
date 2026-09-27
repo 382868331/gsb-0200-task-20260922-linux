@@ -31,8 +31,15 @@ Algorithm (implemented from scratch, no font/raster library used):
 
 4. Crossings are sorted by x.  For a sub-sample point, the winding number
    is the signed sum of all crossings at ``x >= sample_x`` (a sample
-   exactly on an edge is treated as inside).  Coverage is nonzero when
-   the winding number is non-zero.
+   exactly on an edge is treated as inside).  Two selectable fill rules
+   then decide coverage from this single crossing list:
+
+   * ``rule="nonzero"`` (default): covered iff winding != 0;
+   * ``rule="even-odd"``: covered iff the winding number is odd, i.e.
+     coverage alternates every time the boundary is crossed from the
+     outside, independent of direction.  The parity of the signed sum
+     equals the parity of the unsigned crossing count (both +1 and -1
+     are 1 mod 2), so no second intersection code path exists.
 
 Coordinate space: x right, **y up**.  Pixel ``(px, py)`` covers the unit
 square ``[px, px+1] x [py, py+1]``; grid row 0 is therefore the bottom
@@ -52,6 +59,15 @@ from .geometry import MAX_CONTOURS, Contour, Line, Quad
 
 SUBSAMPLES = 4
 """Fixed sub-sampling: 4 x 4 = 16 samples per pixel (part of contract)."""
+
+NONZERO_RULE = "nonzero"
+"""Fill rule name: non-zero winding (the original rule)."""
+
+EVEN_ODD_RULE = "even-odd"
+"""Fill rule name: alternating fill / even-odd parity rule."""
+
+FILL_RULES = (NONZERO_RULE, EVEN_ODD_RULE)
+"""All accepted fill-rule names."""
 
 _SAMPLE_CENTER = 0.125  # (2*0+1)/8
 _SAMPLE_STEP = 0.25
@@ -213,17 +229,37 @@ class CoverageResult:
 
     Attributes:
         width, height: canvas size in pixels;
+        rule: fill rule used to decide coverage --
+            :data:`NONZERO_RULE` (``winding != 0``) or
+            :data:`EVEN_ODD_RULE` (odd number of crossings);
         levels: row-major tuple (grid row ``py`` first; row 0 is the
             bottom) of tuples of integers ``0..16`` -- how many of the 16
             sub-samples are covered (nonzero winding);
         windings: for each pixel a 16-tuple of signed winding numbers,
             indexed ``j * 4 + i`` for sub-sample column ``i``, row ``j``.
+            Under the even-odd rule these are still the signed winding
+            numbers; coverage is the parity of the number of crossings,
+            i.e. of the number of boundary traversals met from the
+            outside, which for a horizontal ray equals the parity of the
+            absolute winding value.
     """
 
     width: int
     height: int
     levels: Tuple[Tuple[int, ...], ...]
     windings: Tuple[Tuple[Tuple[int, ...], ...], ...]
+    rule: str = NONZERO_RULE
+
+    def is_covered(self, winding: int) -> bool:
+        """Apply this result's fill rule to one signed winding number.
+
+        Nonzero rule: ``winding != 0``.  Even-odd rule: ``winding`` is
+        odd (the parity of the crossing count, independent of crossing
+        direction).
+        """
+        if self.rule == NONZERO_RULE:
+            return winding != 0
+        return (winding & 1) != 0
 
     def _check_pixel(self, px: int, py: int) -> None:
         for name, v, hi in (
@@ -265,7 +301,11 @@ class CoverageResult:
 
 
 def rasterize(
-    contours: Sequence[Contour], width: int, height: int
+    contours: Sequence[Contour],
+    width: int,
+    height: int,
+    *,
+    rule: str = NONZERO_RULE,
 ) -> CoverageResult:
     """Rasterize closed contours onto a ``width`` x ``height`` canvas.
 
@@ -275,8 +315,17 @@ def rasterize(
     must be 1..``MAX_CONTOURS`` contours and each canvas side must be an
     integer in ``1..MAX_CANVAS`` (``bool`` rejected).
 
-    Coverage uses the nonzero-winding rule with fixed 4x4 sub-sampling;
-    see the module docstring for exact boundary semantics.
+    ``rule`` selects how crossings decide coverage:
+
+    * :data:`NONZERO_RULE` (default): a sub-sample is covered when its
+      signed winding number is non-zero;
+    * :data:`EVEN_ODD_RULE`: coverage alternates every time the contour
+      is crossed from the outside (odd crossing count).
+
+    Both rules share the *exact same* crossing computation (monotonic
+    splitting, half-open y interval, closed-form roots); only the final
+    coverage predicate differs.  Fixed 4x4 sub-sampling either way; see
+    the module docstring for exact boundary semantics.
 
     Raises:
         InvalidInputError: bad canvas size, wrong argument types or an
@@ -285,6 +334,7 @@ def rasterize(
     from .geometry import canvas_dims
 
     width, height = canvas_dims(width, height)
+    rule = _check_rule(rule)
     if not isinstance(contours, (list, tuple)):
         raise InvalidInputError(
             "contours",
@@ -305,11 +355,15 @@ def rasterize(
             )
 
     pieces = _build_pieces(contours)
-    return _rasterize_pieces(pieces, width, height)
+    return _rasterize_pieces(pieces, width, height, rule)
 
 
 def rasterize_raw(
-    raw_contours: object, width: int, height: int
+    raw_contours: object,
+    width: int,
+    height: int,
+    *,
+    rule: str = NONZERO_RULE,
 ) -> CoverageResult:
     """Validate raw dict/tuple geometry and rasterize it in one call.
 
@@ -319,12 +373,24 @@ def rasterize_raw(
     """
     from .geometry import parse_contours
 
+    rule = _check_rule(rule)
     contours = parse_contours(raw_contours)  # raises on the first bad value
-    return rasterize(contours, width, height)
+    return rasterize(contours, width, height, rule=rule)
+
+
+def _check_rule(rule: object) -> str:
+    """Validate the fill-rule argument (exact string match, no coercion)."""
+    if not isinstance(rule, str) or rule not in FILL_RULES:
+        allowed = ", ".join(repr(r) for r in FILL_RULES)
+        raise InvalidInputError(
+            "rule",
+            f"unknown fill rule {rule!r}; expected one of {allowed}",
+        )
+    return rule
 
 
 def _rasterize_pieces(
-    pieces: List[_Piece], width: int, height: int
+    pieces: List[_Piece], width: int, height: int, rule: str
 ) -> CoverageResult:
     n = SUBSAMPLES
     levels_rows: List[Tuple[int, ...]] = []
@@ -358,7 +424,11 @@ def _rasterize_pieces(
 
         levels_rows.append(
             tuple(
-                sum(1 for w in winding_by_px[px] if w != 0)
+                sum(
+                    1
+                    for w in winding_by_px[px]
+                    if (w != 0 if rule == NONZERO_RULE else (w & 1) != 0)
+                )
                 for px in range(width)
             )
         )
@@ -371,4 +441,5 @@ def _rasterize_pieces(
         height=height,
         levels=tuple(levels_rows),
         windings=tuple(wind_rows),
+        rule=rule,
     )

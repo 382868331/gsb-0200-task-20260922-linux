@@ -6,6 +6,7 @@ import math
 import unittest
 
 from winding_fill import (
+    EVEN_ODD_RULE,
     MAX_CANVAS,
     MAX_CONTOURS,
     InvalidInputError,
@@ -204,6 +205,29 @@ class StructuralInputTests(unittest.TestCase):
         # at least one interior pixel of the first ring is solid
         self.assertEqual(result.levels[y0 + 5][x0 + 5], 16)
         self.assertLess(elapsed, 15.0)  # generous CI bound, not a burn-in
+
+
+class FillRuleValidationTests(unittest.TestCase):
+    def test_rule_exact_strings_only(self):
+        raw = square_raw()
+        # both accepted strings work and tag the result
+        nz = rasterize_raw(raw, 8, 8)
+        self.assertEqual(nz.rule, "nonzero")
+        eo = rasterize_raw(raw, 8, 8, rule=EVEN_ODD_RULE)
+        self.assertEqual(eo.rule, "even-odd")
+        for bad in ("even_odd", "Even-Odd", "NONZERO", "", 0, 1, None,
+                    True, False, object()):
+            with self.assertRaises(InvalidInputError) as cm:
+                rasterize_raw(raw, 8, 8, rule=bad)
+            self.assertEqual(cm.exception.location, "rule")
+        con = parse_contours(raw)[0]
+        with self.assertRaises(InvalidInputError):
+            rasterize([con], 8, 8, rule="odd")
+
+    def test_rule_is_keyword_only(self):
+        raw = square_raw()
+        with self.assertRaises(TypeError):
+            rasterize_raw(raw, 8, 8, "even-odd")
 
 
 class QueryAndBuilderTests(unittest.TestCase):

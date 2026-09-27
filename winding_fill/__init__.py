@@ -2,8 +2,10 @@
 
 Reusable offline library for an offline font-rasterization kernel:
 closed contours made of line segments and quadratic Beziers are
-rasterized with the nonzero winding rule using a fixed 4x4
-sub-sample grid per pixel.
+rasterized using a fixed 4x4 sub-sample grid per pixel.  The fill
+rule is selectable: nonzero winding (default, ``rule="nonzero"``)
+or alternating even-odd parity (``rule="even-odd"``); both rules
+share the exact same intersection computation.
 
 Quick start::
 
@@ -21,8 +23,10 @@ Quick start::
         width=8,
         height=8,
     )
-    result.coverage_at(3, 3)   # 1.0
+    result.coverage_at(3, 3)   # 1.0 (nonzero rule)
     result.winding_at(3, 3, 0, 0)  # +1
+
+    parity = rasterize_raw(raw_data, 8, 8, rule="even-odd")
 
 Coordinate space: x right, y up; pixel (px, py) covers
 ``[px, px+1] x [py, py+1]`` and grid row 0 is the bottom row.
@@ -31,6 +35,9 @@ Coordinate space: x right, y up; pixel (px, py) covers
 from __future__ import annotations
 
 from .core import (
+    EVEN_ODD_RULE,
+    FILL_RULES,
+    NONZERO_RULE,
     SUBSAMPLES,
     CoverageResult,
     rasterize,
@@ -56,10 +63,13 @@ __all__ = [
     "MAX_COORD_ABS",
     "CoverageResult",
     "Contour",
+    "EVEN_ODD_RULE",
+    "FILL_RULES",
     "InvalidInputError",
     "Line",
     "Point",
     "Quad",
+    "NONZERO_RULE",
     "WindingFillError",
     "build_contour",
     "parse_contours",

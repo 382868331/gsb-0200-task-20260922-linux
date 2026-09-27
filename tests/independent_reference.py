@@ -18,6 +18,12 @@ computed by a completely different code path from the rasterizer core:
 Both references implement the same contractual rules as the core:
 half-open y interval ``lo <= sy < hi``, signed upward/downward
 crossings, horizontal pieces ignored, nonzero winding => covered.
+
+The even-odd (alternating) rule is supported by the ``rule`` keyword:
+``rule="even-odd"`` ignores crossing directions and toggles the inside
+state at every crossing instead of summing signed directions.  This is
+an independent implementation: it counts unsigned crossings, never
+imports the core, and shares only the same geometric root code above.
 """
 
 from __future__ import annotations
@@ -48,8 +54,16 @@ def _span_and_dir(ya, yb):
     return None
 
 
-def _assemble(rows_by_py, width, height, decimal=False):
-    """Turn {py: {j: [(x, dir), ...]}} into (levels, windings)."""
+def _assemble(rows_by_py, width, height, decimal=False, rule="nonzero"):
+    """Turn {py: {j: [(x, dir), ...]}} into (levels, windings).
+
+    The windings stored are always the signed suffix sums, under both
+    rules, so callers can also verify the core keeps identical crossing
+    geometry.  Under the even-odd rule the coverage predicate is the
+    parity of the number of crossings to the right; the parity of the
+    signed winding value is the same parity, which the per-assertion
+    tests cross-check against the explicit count.
+    """
     zero = _D(0) if decimal else Fraction(0)
     offsets = _SAMPLE_OFFSETS_D if decimal else _SAMPLE_OFFSETS
     sample_x = (lambda px, i: zero + Decimal(px) + offsets[i]) if decimal else (
@@ -57,6 +71,9 @@ def _assemble(rows_by_py, width, height, decimal=False):
     )
     levels_rows: List[Tuple[int, ...]] = []
     wind_rows: List[Tuple[Tuple[int, ...], ...]] = []
+    covered = (lambda w: w != 0) if rule == "nonzero" else (
+        lambda w: (w & 1) != 0
+    )
     for py in range(height):
         by_px: List[List[int]] = [[0] * 16 for _ in range(width)]
         for j in range(4):
@@ -66,13 +83,27 @@ def _assemble(rows_by_py, width, height, decimal=False):
             suffix = [0] * (len(dirs) + 1)
             for k in range(len(dirs) - 1, -1, -1):
                 suffix[k] = suffix[k + 1] + dirs[k]
+            # Independent unsigned-crossing parity (separate prefix work):
+            # state[k] = (number of crossings from k to the end) mod 2.
+            if rule == "even-odd":
+                parity = [0] * (len(dirs) + 1)
+                for k in range(len(dirs) - 1, -1, -1):
+                    parity[k] = parity[k + 1] ^ 1
             for px in range(width):
                 for i in range(4):
                     sx = sample_x(px, i)
                     k = bisect.bisect_left(xs, sx)
-                    by_px[px][j * 4 + i] = suffix[k]
+                    w = suffix[k]
+                    by_px[px][j * 4 + i] = w
+                    if rule == "even-odd":
+                        # The explicit crossing count and the signed
+                        # winding parity must agree (both are integers).
+                        assert (abs(w) & 1) == parity[k]
         levels_rows.append(
-            tuple(sum(1 for w in by_px[px] if w != 0) for px in range(width))
+            tuple(
+                sum(1 for w in by_px[px] if covered(w))
+                for px in range(width)
+            )
         )
         wind_rows.append(tuple(tuple(by_px[px]) for px in range(width)))
     return tuple(levels_rows), tuple(wind_rows)
@@ -126,7 +157,26 @@ def winding_point_lines(raw_contours, sx: Fraction, sy: Fraction) -> int:
     return total
 
 
-def reference_levels_lines(raw_contours, width: int, height: int):
+def parity_point_lines(raw_contours, sx: Fraction, sy: Fraction) -> int:
+    """Exact even-odd inside-state of one point: unsigned crossings mod 2.
+
+    Completely independent of signed-direction bookkeeping: directions
+    are never inspected, crossings are only toggled.
+    """
+    parity = 0
+    for x0, y0, x1, y1 in _line_edges(raw_contours):
+        if y0 == y1:
+            continue
+        lo, hi = (y0, y1) if y0 < y1 else (y1, y0)
+        if lo <= sy < hi:
+            x = x0 + (sy - y0) * (x1 - x0) / (y1 - y0)
+            if x >= sx:
+                parity ^= 1
+    return parity
+
+
+def reference_levels_lines(raw_contours, width: int, height: int,
+                           rule: str = "nonzero"):
     """Return (levels, windings) with exact Fraction arithmetic."""
     edges = _line_edges(raw_contours)
     rows_by_py = {}
@@ -145,7 +195,7 @@ def reference_levels_lines(raw_contours, width: int, height: int):
                     hits.append((x, direction))
             per_j[j] = hits
         rows_by_py[py] = per_j
-    return _assemble(rows_by_py, width, height)
+    return _assemble(rows_by_py, width, height, rule=rule)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +319,8 @@ def winding_point_mixed(raw_contours, sx: Decimal, sy: Decimal) -> int:
     return total
 
 
-def reference_levels_mixed(raw_contours, width: int, height: int):
+def reference_levels_mixed(raw_contours, width: int, height: int,
+                           rule: str = "nonzero"):
     """Return (levels, windings) via 60-digit Decimal bisection."""
     pieces = _pieces_decimal(raw_contours)
     rows_by_py = {}
@@ -298,4 +349,46 @@ def reference_levels_mixed(raw_contours, width: int, height: int):
                         hits.append((_quad_x(t, x0, cx, x1), direction))
             per_j[j] = hits
         rows_by_py[py] = per_j
-    return _assemble(rows_by_py, width, height, decimal=True)
+    levels, winds = _assemble(
+        rows_by_py, width, height, decimal=True, rule=rule
+    )
+    return levels, winds
+
+
+def min_crossing_sample_distance_mixed(raw_contours, width: int, height: int):
+    """Smallest Decimal distance between any crossing x and a sample x.
+
+    Test helper (never used by the core): when this distance is within
+    double-precision root round-off (~1e-15 at coordinate scale <= 1024),
+    the two arithmetic paths may legitimately classify that one
+    sub-sample differently -- see README's error-budget section.
+    """
+    pieces = _pieces_decimal(raw_contours)
+    best = None
+    for py in range(height):
+        for j in range(4):
+            sy = Decimal(py) + _SAMPLE_OFFSETS_D[j]
+            xs = []
+            for piece in pieces:
+                if piece[0] == "line":
+                    _, x0, y0, x1, y1 = piece
+                    span = _span_and_dir(y0, y1)
+                    if span is None:
+                        continue
+                    lo, hi, _ = span
+                    if lo <= sy < hi:
+                        xs.append(
+                            x0 + (sy - y0) * (x1 - x0) / (y1 - y0)
+                        )
+                else:
+                    _, x0, y0, cx, cy, x1, y1, ta, tb = piece
+                    t = _bisect_root(y0, cy, y1, ta, tb, sy)
+                    if t is not None:
+                        xs.append(_quad_x(t, x0, cx, x1))
+            for x in xs:
+                for px in range(width):
+                    for off in _SAMPLE_OFFSETS_D:
+                        d = abs(x - (Decimal(px) + off))
+                        if best is None or d < best:
+                            best = d
+    return best
