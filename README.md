@@ -1,10 +1,13 @@
-# winding_fill — 非零环绕多边形/二次曲线填充模块
+# winding_fill — 多边形/二次曲线填充模块（非零环绕 / 奇偶两种规则）
 
 为离线字体栅格内核提供的**可复用**模块：输入由线段与二次 Bézier 组成的至多
 20 条闭合轮廓（有理坐标），在不大于 64×64 的画布上，按**每像素固定 4×4
-子采样**、对水平射线用**半开 y 规则**累加带方向交点，以 **nonzero
-winding（非零环绕）** 规则决定每个子样本是否被覆盖，输出 17 级灰度覆盖值
-（k/16, k=0..16）并允许逐子样本查询有符号环绕数。
+子采样**、对水平射线用**半开 y 规则**累加带方向交点，由使用者在
+**nonzero winding（非零环绕，默认）** 与 **even-odd（奇偶交替）** 两套
+填充规则之间选择来决定每个子样本是否被覆盖，输出 17 级灰度覆盖值
+（k/16, k=0..16），并允许逐子样本查询有符号环绕数与交点奇偶。两套规则
+共用**完全相同**的交点计算（单调拆分、半开 y、二次求根），只是在把
+交点序列归约成覆盖判定时不同。
 
 全部核心算法从零实现，**不调用任何字体/绘图库或第三方同类实现**。
 
@@ -17,7 +20,7 @@ winding（非零环绕）** 规则决定每个子样本是否被覆盖，输出 
 ## 准确命令
 
 ```bash
-# 必要测试（46 个），全部离线、确定性
+# 必要测试（59 个），全部离线、确定性
 python -m unittest discover -s tests -v
 
 # 固定输入演示（约 0.04 秒；远低于题面约 8 秒的预算）
@@ -34,6 +37,7 @@ from winding_fill import (
     rasterize,                      # Contour 列表 -> CoverageResult
     rasterize_raw,                  # 校验 + 栅格化一步完成
     CoverageResult,                 # 结果对象
+    FillRule,                       # NONZERO / EVEN_ODD 规则枚举
     InvalidInputError, WindingFillError,
     SUBSAMPLES,      # = 4（契约常量）
     MAX_CONTOURS,    # = 20
@@ -66,16 +70,33 @@ from winding_fill import (
 
 ### 结果查询
 
-`result = rasterize(contours, width, height)` 返回 `CoverageResult`：
+`result = rasterize(contours, width, height, *, rule=FillRule.NONZERO)`
+返回 `CoverageResult`（`rasterize_raw` 同样支持 `rule=` 关键字）：
+
+- `rule` 可取 `FillRule.NONZERO`（默认）或 `FillRule.EVEN_ODD`；也接受
+  字符串别名 `"nonzero"` / `"non-zero"` / `"winding"` 与
+  `"even-odd"` / `"evenodd"` / `"parity"`。其它类型（含 `bool`、数字）
+  一律以 `InvalidInputError`（`location="rule"`）拒绝。
+- **非零环绕**：子样本右侧所有交点的带方向后缀和（环绕数）≠0 即覆盖；
+  同向重叠轮廓叠加（环绕数可为 ±2…）。
+- **奇偶**：从子样本向右到无穷远的**交点个数为奇数**即覆盖（进入轮廓
+  时在填充/不填充之间交替，与方向无关）；重叠两次的区域被反转回空，
+  自交轮廓可能与非零规则得到不同结果。
 
 - `result.levels`：行主序元组 `levels[py][px] ∈ {0,...,16}`，被覆盖子样本
   数；`py=0` 为**底部**一行（坐标系 y 向上，像素 `(px,py)` 覆盖
   `[px,px+1]×[py,py+1]`）。
 - `result.windings[py][px]`：16 个有符号环绕数，索引 `j*4+i`
   （`i`,`j` ∈ 0..3 为子样本列/行）。
+- `result.parities[py][px]`：16 个交点奇偶值（0/1，1 = 奇偶规则下在内部）。
 - `coverage_at(px, py) -> float`：`k/16`。
 - `windings_at(px, py) -> tuple[int,...]`：16 个环绕数。
 - `winding_at(px, py, i, j) -> int`：单个子样本的有符号环绕数。
+- `parities_at(px, py)` / `parity_at(px, py, i, j)`：交点奇偶值；
+  `inside_at(px, py, i, j)` 按结果实际使用的规则返回是否覆盖。
+
+`windings` 与 `parities` 在两种规则下都会给出且数值与所选规则无关——
+**交点计算不随规则改变**；只有 `levels` 的归约方式随 `rule` 变化。
 
 子样本 `(i,j)` 位于
 `(px+(2i+1)/8, py+(2j+1)/8)`（像素中心 4×4 网格）。
@@ -114,9 +135,13 @@ from winding_fill import (
 4. **切点确定性**：曲线 y 极值由 `y(t*)` 一次算出，相邻两段共用同一
    float 极值：要么两段都计入（−1/+1 成对抵消），要么都不计入，不依赖
    容差。
-5. **环绕累加**：交点按 x 排序后做有符号后缀和；子样本点的环绕数为其
-   右侧（`x ≥ sx`，点恰在边上按内部处理）所有交点方向之和；`winding≠0`
-   即覆盖。
+5. **交点归约（两套规则共用同一交点列表）**：交点按 x 排序后同时计算
+   两个后缀量——带方向后缀和（环绕数）与交点个数的后缀奇偶。子样本的
+   环绕数为其右侧（`x ≥ sx`，点恰在边上按内部处理）所有交点方向之和。
+   选 `FillRule.NONZERO` 时 `winding≠0` 即覆盖；选 `FillRule.EVEN_ODD`
+   时右侧交点数为奇数即覆盖。自交、重叠轮廓和恰好碰到顶点时两规则可能
+   不同，但**排序、求根、半开 y 等交点计算完全一致**（测试直接断言两种
+   规则的 `windings` 相等）。
 6. **坐标系**：x 向右、**y 向上**，与字体 EM 网格习惯一致；渲染为图像时
    调用方自行翻转行序。
 
@@ -126,7 +151,9 @@ from winding_fill import (
   用 `fractions.Fraction` **精确有理**参考逐子样本比对（必须**完全相等**，
   不是“近似”）；对含二次曲线的几何用 60 位 `decimal.Decimal` +
   130 次二分求根（约 1e-39）的独立参考比对（**完全相等**）。参考实现
-  位于 `tests/independent_reference.py`，**不导入被测核心**。
+  位于 `tests/independent_reference.py`，**不导入被测核心**；两套填充
+  规则（`rule="nonzero"` / `rule="even-odd"`）都分别与独立参考逐
+  子样本比对。
 - 唯一使用 float 的地方是曲线求根的舍入：核心为 IEEE-754 双精度。测试
   坐标刻意取在 1/8 网格上，而 Decimal 参考以 ~1e-39 精度判定；当真实交点
   与某子样本 x 坐标的距离小于双精度舍入（~1e-15，乘以 ≤1024 的坐标量级）
@@ -139,11 +166,11 @@ from winding_fill import (
 
 - 仅实现本题契约的数学子集：线段 + 二次 Bézier；**不支持**三次及以上
   Bézier、圆弧、可变子采样率（固定 4×4）、子像素平移 hinting、
-  anti-alias 滤波（覆盖率就是盒子滤波的 k/16）、奇偶(even-odd)规则。
+  anti-alias 滤波（覆盖率就是盒子滤波的 k/16）。
 - 不宣称与任何行业标准（TrueType/OpenType scan-converter、SVG、
   D 算法细节、Porter-Duff 合成等）完整兼容；只对本文档描述的契约负责。
-- 不做几何自交清洗：自交轮廓按 nonzero winding 的数学定义直接得到结果
-  （测试含蝴蝶结自交用例）。
+- 不做几何自交清洗：自交轮廓按所选规则（nonzero 或 even-odd）的数学
+  定义直接得到结果（测试含蝴蝶结与偏移网格五角星自交用例）。
 - 轮廓非常复杂时（段数很多）时间随“子样本行 × 段数”线性增长；上限
   规模（20 条曲边轮廓、64×64）实测亚秒级。
 
@@ -163,6 +190,7 @@ tests/independent_reference.py  # Fraction / Decimal 独立参考（不导入核
 ## 演示说明
 
 `python demo.py` 真实计算一个 19×13 字形（CCW 曲边外框 + 与其重叠的 CCW
-矩形 + CW 曲边洞），打印灰度图与 4 个固定子样本环绕数（普通区域 +1、
-重叠区域 +2、洞内 0、外部 0），并实际触发两类拒绝：NaN 坐标
+矩形 + CW 曲边洞），分别在 nonzero 与 even-odd 两种规则下打印灰度图与
+固定子样本查询（普通区域 +1、重叠区域 nonzero 下 +2 但 even-odd 下因两次
+穿越被反转成空、洞内 0、外部 0），并实际触发两类拒绝：NaN 坐标
 （定位到具体字段）与 `bool` 冒充整数画布宽度。无 sleep、无预录结果。

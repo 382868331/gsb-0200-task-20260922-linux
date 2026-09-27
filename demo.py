@@ -21,6 +21,7 @@ import math
 import time
 
 from winding_fill import (
+    FillRule,
     InvalidInputError,
     WindingFillError,
     build_contour,
@@ -55,8 +56,9 @@ def normal_result() -> None:
     )
     hole_rev = _reverse_contour(hole)
 
+    contours = [outer, overlap, hole_rev]
     t0 = time.perf_counter()
-    result = rasterize([outer, overlap, hole_rev], width, height)
+    result = rasterize(contours, width, height)
     elapsed = time.perf_counter() - t0
 
     print(f"=== nonzero-winding fill: {width}x{height} canvas, 4x4 sub-samples ===")
@@ -91,6 +93,34 @@ def normal_result() -> None:
     assert all(w == 2 for w in overlap_pixel), overlap_pixel
     assert result.coverage_at(6, 5) == 0.0
     assert result.coverage_at(2, 6) == 1.0
+
+    # Same geometry with the alternative even-odd rule.  Crossing
+    # computation is identical (same winding numbers); only the
+    # coverage reduction changes.
+    result_eo = rasterize(contours, width, height, rule=FillRule.EVEN_ODD)
+    assert result_eo.windings == result.windings
+    print("=== even-odd fill of the same glyph ===")
+    print("    " + "".join(str(x % 10) for x in range(width)))
+    for py in range(height - 1, -1, -1):
+        row = "".join(_shade(result_eo.levels[py][px]) for px in range(width))
+        print(f"{py:2d}  {row}")
+    print("legend: ' '=0/16 ... '@'=16/16 covered\n")
+    eo_queries = [
+        (2, 6, 1, 2, "inside outer only (odd -> filled)"),
+        (11, 6, 1, 2, "outer + overlap (2 crossings -> toggled OFF)"),
+        (6, 5, 1, 2, "inside the reversed hole (0 crossings, empty under both)"),
+    ]
+    print("even-odd sub-sample queries:")
+    for px, py, i, j, desc in eo_queries:
+        print(
+            f"  pixel({px:2d},{py:2d}) sample[{i},{j}] "
+            f"parity={result_eo.parity_at(px, py, i, j):+d}  "
+            f"winding={result_eo.winding_at(px, py, i, j):+d}   # {desc}"
+        )
+    assert result_eo.coverage_at(11, 6) == 0.0
+    assert result_eo.coverage_at(6, 5) == 0.0
+    assert result_eo.coverage_at(2, 6) == 1.0
+    print()
 
 
 def _reverse_contour(contour):

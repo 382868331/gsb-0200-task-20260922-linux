@@ -48,7 +48,7 @@ def _span_and_dir(ya, yb):
     return None
 
 
-def _assemble(rows_by_py, width, height, decimal=False):
+def _assemble(rows_by_py, width, height, decimal=False, rule="nonzero"):
     """Turn {py: {j: [(x, dir), ...]}} into (levels, windings)."""
     zero = _D(0) if decimal else Fraction(0)
     offsets = _SAMPLE_OFFSETS_D if decimal else _SAMPLE_OFFSETS
@@ -64,15 +64,24 @@ def _assemble(rows_by_py, width, height, decimal=False):
             xs = [c[0] for c in crossings]
             dirs = [c[1] for c in crossings]
             suffix = [0] * (len(dirs) + 1)
-            for k in range(len(dirs) - 1, -1, -1):
-                suffix[k] = suffix[k + 1] + dirs[k]
+            if rule == "nonzero":
+                for k in range(len(dirs) - 1, -1, -1):
+                    suffix[k] = suffix[k + 1] + dirs[k]
+            else:  # even-odd: store suffix crossing count parity as 0/1
+                for k in range(len(dirs) - 1, -1, -1):
+                    suffix[k] = suffix[k + 1] ^ 1
             for px in range(width):
                 for i in range(4):
                     sx = sample_x(px, i)
                     k = bisect.bisect_left(xs, sx)
                     by_px[px][j * 4 + i] = suffix[k]
         levels_rows.append(
-            tuple(sum(1 for w in by_px[px] if w != 0) for px in range(width))
+            tuple(
+                sum(1 for w in by_px[px] if w != 0)
+                if rule == "nonzero"
+                else sum(by_px[px])
+                for px in range(width)
+            )
         )
         wind_rows.append(tuple(tuple(by_px[px]) for px in range(width)))
     return tuple(levels_rows), tuple(wind_rows)
@@ -126,7 +135,8 @@ def winding_point_lines(raw_contours, sx: Fraction, sy: Fraction) -> int:
     return total
 
 
-def reference_levels_lines(raw_contours, width: int, height: int):
+def reference_levels_lines(raw_contours, width: int, height: int,
+                           rule: str = "nonzero"):
     """Return (levels, windings) with exact Fraction arithmetic."""
     edges = _line_edges(raw_contours)
     rows_by_py = {}
@@ -145,7 +155,7 @@ def reference_levels_lines(raw_contours, width: int, height: int):
                     hits.append((x, direction))
             per_j[j] = hits
         rows_by_py[py] = per_j
-    return _assemble(rows_by_py, width, height)
+    return _assemble(rows_by_py, width, height, rule=rule)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +279,8 @@ def winding_point_mixed(raw_contours, sx: Decimal, sy: Decimal) -> int:
     return total
 
 
-def reference_levels_mixed(raw_contours, width: int, height: int):
+def reference_levels_mixed(raw_contours, width: int, height: int,
+                           rule: str = "nonzero"):
     """Return (levels, windings) via 60-digit Decimal bisection."""
     pieces = _pieces_decimal(raw_contours)
     rows_by_py = {}
@@ -298,4 +309,4 @@ def reference_levels_mixed(raw_contours, width: int, height: int):
                         hits.append((_quad_x(t, x0, cx, x1), direction))
             per_j[j] = hits
         rows_by_py[py] = per_j
-    return _assemble(rows_by_py, width, height, decimal=True)
+    return _assemble(rows_by_py, width, height, decimal=True, rule=rule)

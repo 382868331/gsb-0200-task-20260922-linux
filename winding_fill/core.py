@@ -43,6 +43,7 @@ row.  Sub-sample ``(i, j)`` (both 0..3) sits at
 from __future__ import annotations
 
 import bisect
+from enum import Enum
 import math
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
@@ -52,6 +53,55 @@ from .geometry import MAX_CONTOURS, Contour, Line, Quad
 
 SUBSAMPLES = 4
 """Fixed sub-sampling: 4 x 4 = 16 samples per pixel (part of contract)."""
+
+
+class FillRule(Enum):
+    """Rule deciding whether a sub-sample is covered.
+
+    The two rules share the *same* crossing computation (monotonic
+    splitting, half-open y interval, quadratic root solving); they only
+    differ in how crossings to the right of a point are reduced to a
+    covered/not-covered decision.
+
+    * :attr:`NONZERO`: covered when the signed winding number is not 0;
+      overlapping contours of equal orientation add up.
+    * :attr:`EVEN_ODD`: covered when the number of contour crossings
+      from the point to infinity is odd.  Entering a contour toggles
+      between filled and unfilled, regardless of orientation, so
+      coincident loops cancel and self-intersections can fill
+      differently from the nonzero rule.
+    """
+
+    NONZERO = "nonzero"
+    EVEN_ODD = "even-odd"
+
+
+# String aliases accepted in addition to FillRule members.
+_RULE_ALIASES = {
+    "nonzero": FillRule.NONZERO,
+    "non-zero": FillRule.NONZERO,
+    "winding": FillRule.NONZERO,
+    "even-odd": FillRule.EVEN_ODD,
+    "evenodd": FillRule.EVEN_ODD,
+    "parity": FillRule.EVEN_ODD,
+}
+
+
+def _coerce_rule(rule: object) -> FillRule:
+    if isinstance(rule, bool):
+        raise InvalidInputError(
+            "rule",
+            "expected FillRule.NONZERO or FillRule.EVEN_ODD, got bool",
+        )
+    if isinstance(rule, FillRule):
+        return rule
+    if isinstance(rule, str) and rule in _RULE_ALIASES:
+        return _RULE_ALIASES[rule]
+    raise InvalidInputError(
+        "rule",
+        "expected FillRule.NONZERO or FillRule.EVEN_ODD "
+        f"(or their string aliases), got {type(rule).__name__}: {rule!r}",
+    )
 
 _SAMPLE_CENTER = 0.125  # (2*0+1)/8
 _SAMPLE_STEP = 0.25
@@ -213,17 +263,23 @@ class CoverageResult:
 
     Attributes:
         width, height: canvas size in pixels;
+        rule: the :class:`FillRule` used for the coverage decision;
         levels: row-major tuple (grid row ``py`` first; row 0 is the
             bottom) of tuples of integers ``0..16`` -- how many of the 16
             sub-samples are covered (nonzero winding);
         windings: for each pixel a 16-tuple of signed winding numbers,
             indexed ``j * 4 + i`` for sub-sample column ``i``, row ``j``.
+        parities: for each pixel a 16-tuple of crossing-count parities
+            (0/1, ``1`` means inside under the even-odd rule).  Under
+            both rules the signed winding numbers are still provided.
     """
 
     width: int
     height: int
     levels: Tuple[Tuple[int, ...], ...]
     windings: Tuple[Tuple[Tuple[int, ...], ...], ...]
+    parities: Tuple[Tuple[Tuple[int, ...], ...], ...] = ()
+    rule: FillRule = FillRule.NONZERO
 
     def _check_pixel(self, px: int, py: int) -> None:
         for name, v, hi in (
@@ -263,9 +319,43 @@ class CoverageResult:
                 raise InvalidInputError(name, f"{v} outside 0..3")
         return self.windings[py][px][j * SUBSAMPLES + i]
 
+    def parity_at(self, px: int, py: int, i: int, j: int) -> int:
+        """Crossing-count parity (0/1) of one sub-sample (``i, j`` in 0..3).
+
+        ``1`` means the point is covered under the even-odd rule.
+        """
+        self._check_pixel(px, py)
+        for name, v in (("i", i), ("j", j)):
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise InvalidInputError(
+                    name, f"expected integer 0..3, got {type(v).__name__}"
+                )
+            if not 0 <= v < SUBSAMPLES:
+                raise InvalidInputError(name, f"{v} outside 0..3")
+        return self.parities[py][px][j * SUBSAMPLES + i]
+
+    def parities_at(self, px: int, py: int) -> Tuple[int, ...]:
+        """16 crossing-count parities (0/1) for pixel ``(px, py)``.
+
+        Index order is sub-row ``j`` first then sub-column ``i``:
+        ``index = j * 4 + i``.
+        """
+        self._check_pixel(px, py)
+        return self.parities[py][px]
+
+    def inside_at(self, px: int, py: int, i: int, j: int) -> bool:
+        """Whether sub-sample ``(i, j)`` is covered by this result's rule."""
+        if self.rule is FillRule.EVEN_ODD:
+            return bool(self.parity_at(px, py, i, j))
+        return self.winding_at(px, py, i, j) != 0
+
 
 def rasterize(
-    contours: Sequence[Contour], width: int, height: int
+    contours: Sequence[Contour],
+    width: int,
+    height: int,
+    *,
+    rule: FillRule | str = FillRule.NONZERO,
 ) -> CoverageResult:
     """Rasterize closed contours onto a ``width`` x ``height`` canvas.
 
@@ -275,8 +365,13 @@ def rasterize(
     must be 1..``MAX_CONTOURS`` contours and each canvas side must be an
     integer in ``1..MAX_CANVAS`` (``bool`` rejected).
 
-    Coverage uses the nonzero-winding rule with fixed 4x4 sub-sampling;
-    see the module docstring for exact boundary semantics.
+    Coverage uses fixed 4x4 sub-sampling.  ``rule`` selects between the
+    nonzero-winding rule (:data:`FillRule.NONZERO`, the default) and the
+    even-odd rule (:data:`FillRule.EVEN_ODD`); both rules use the exact
+    same crossing positions and half-open-y vertex handling, so on
+    simple contours they agree and differ only for self-intersections,
+    overlapping contours and exact vertex cases.  String aliases such
+    as ``"nonzero"`` and ``"even-odd"`` are accepted.
 
     Raises:
         InvalidInputError: bad canvas size, wrong argument types or an
@@ -304,12 +399,18 @@ def rasterize(
                 f"expected Contour, got {type(con).__name__}",
             )
 
+    fill_rule = _coerce_rule(rule)
+
     pieces = _build_pieces(contours)
-    return _rasterize_pieces(pieces, width, height)
+    return _rasterize_pieces(pieces, width, height, fill_rule)
 
 
 def rasterize_raw(
-    raw_contours: object, width: int, height: int
+    raw_contours: object,
+    width: int,
+    height: int,
+    *,
+    rule: FillRule | str = FillRule.NONZERO,
 ) -> CoverageResult:
     """Validate raw dict/tuple geometry and rasterize it in one call.
 
@@ -319,19 +420,27 @@ def rasterize_raw(
     """
     from .geometry import parse_contours
 
+    fill_rule = _coerce_rule(rule)
     contours = parse_contours(raw_contours)  # raises on the first bad value
-    return rasterize(contours, width, height)
+    return rasterize(contours, width, height, rule=fill_rule)
 
 
 def _rasterize_pieces(
-    pieces: List[_Piece], width: int, height: int
+    pieces: List[_Piece],
+    width: int,
+    height: int,
+    fill_rule: FillRule,
 ) -> CoverageResult:
     n = SUBSAMPLES
     levels_rows: List[Tuple[int, ...]] = []
     wind_rows: List[Tuple[Tuple[int, ...], ...]] = []
+    parity_rows: List[Tuple[Tuple[int, ...], ...]] = []
 
     for py in range(height):
         winding_by_px: List[List[int]] = [
+            [0] * (n * n) for _ in range(width)
+        ]
+        parity_by_px: List[List[int]] = [
             [0] * (n * n) for _ in range(width)
         ]
         for j in range(n):
@@ -349,21 +458,37 @@ def _rasterize_pieces(
             suffix = [0] * (len(dirs) + 1)
             for k in range(len(dirs) - 1, -1, -1):
                 suffix[k] = suffix[k + 1] + dirs[k]
+            # Suffix crossing-count parity (orientation-independent).
+            suffix_parity = [0] * (len(dirs) + 1)
+            for k in range(len(dirs) - 1, -1, -1):
+                suffix_parity[k] = suffix_parity[k + 1] ^ 1
             for px in range(width):
                 base = j * n
                 for i in range(n):
                     sx = px + _SAMPLE_CENTER + i * _SAMPLE_STEP
                     k = bisect.bisect_left(xs, sx)
                     winding_by_px[px][base + i] = suffix[k]
+                    parity_by_px[px][base + i] = suffix_parity[k]
 
-        levels_rows.append(
-            tuple(
-                sum(1 for w in winding_by_px[px] if w != 0)
-                for px in range(width)
+        if fill_rule is FillRule.EVEN_ODD:
+            levels_rows.append(
+                tuple(
+                    sum(parity_by_px[px])
+                    for px in range(width)
+                )
             )
-        )
+        else:
+            levels_rows.append(
+                tuple(
+                    sum(1 for w in winding_by_px[px] if w != 0)
+                    for px in range(width)
+                )
+            )
         wind_rows.append(
             tuple(tuple(winding_by_px[px]) for px in range(width))
+        )
+        parity_rows.append(
+            tuple(tuple(parity_by_px[px]) for px in range(width))
         )
 
     return CoverageResult(
@@ -371,4 +496,6 @@ def _rasterize_pieces(
         height=height,
         levels=tuple(levels_rows),
         windings=tuple(wind_rows),
+        parities=tuple(parity_rows),
+        rule=fill_rule,
     )

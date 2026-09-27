@@ -31,6 +31,7 @@ Coordinate space: x right, y up; pixel (px, py) covers
 from __future__ import annotations
 
 from .core import (
+    FillRule,
     SUBSAMPLES,
     CoverageResult,
     rasterize,
@@ -56,6 +57,7 @@ __all__ = [
     "MAX_COORD_ABS",
     "CoverageResult",
     "Contour",
+    "FillRule",
     "InvalidInputError",
     "Line",
     "Point",

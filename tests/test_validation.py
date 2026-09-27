@@ -6,6 +6,7 @@ import math
 import unittest
 
 from winding_fill import (
+    FillRule,
     MAX_CANVAS,
     MAX_CONTOURS,
     InvalidInputError,
@@ -209,6 +210,28 @@ class StructuralInputTests(unittest.TestCase):
 class QueryAndBuilderTests(unittest.TestCase):
     def setUp(self):
         self.result = rasterize_raw(square_raw(), 8, 8)
+
+    def test_invalid_rule_rejected_before_geometry(self):
+        for bad in ("wibble", 1, 1.0, None, True, FillRule):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InvalidInputError) as cm:
+                    rasterize_raw(square_raw(), 8, 8, rule=bad)
+                self.assertEqual(cm.exception.location, "rule")
+
+    def test_default_is_nonzero_and_enum_accepted(self):
+        r0 = rasterize_raw(square_raw(), 8, 8)
+        r1 = rasterize_raw(square_raw(), 8, 8, rule=FillRule.NONZERO)
+        r2 = rasterize_raw(square_raw(), 8, 8, rule=FillRule.EVEN_ODD)
+        self.assertIs(r0.rule, FillRule.NONZERO)
+        self.assertIs(r1.rule, FillRule.NONZERO)
+        self.assertIs(r2.rule, FillRule.EVEN_ODD)
+        con = parse_contours(square_raw())
+        r3 = rasterize(con, 8, 8, rule="non-zero")
+        r4 = rasterize(con, 8, 8, rule="parity")
+        self.assertIs(r3.rule, FillRule.NONZERO)
+        self.assertIs(r4.rule, FillRule.EVEN_ODD)
+        with self.assertRaises(InvalidInputError):
+            rasterize(con, 8, 8, rule=0)
 
     def test_pixel_index_validation(self):
         with self.assertRaises(InvalidInputError):

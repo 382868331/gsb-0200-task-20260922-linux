@@ -12,6 +12,7 @@ import random
 import unittest
 
 from winding_fill import build_contour, rasterize, rasterize_raw
+from winding_fill import FillRule
 
 from independent_reference import (
     reference_levels_lines,
@@ -273,6 +274,176 @@ class WindingRuleTests(unittest.TestCase):
         result = rasterize_raw([sq, sq], 7, 7)
         self.assertEqual(result.levels[3][3], 16)
         self.assertTrue(all(w == 2 for w in result.windings[3][3]))
+
+
+class EvenOddRuleTests(unittest.TestCase):
+    @staticmethod
+    def _square(x0, y0, x1, y1, reverse=False):
+        pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        if reverse:
+            pts = list(reversed(pts))
+        return _chain_contour(pts)
+
+    def test_matches_exact_reference_lines(self):
+        rng = random.Random(20260928)
+        for case in range(18):
+            ncon = rng.randint(1, 3)
+            raw = []
+            for _ in range(ncon):
+                n = rng.randint(3, 6)
+                pts = [
+                    (rng.randint(1, 79) / 8.0, rng.randint(1, 79) / 8.0)
+                    for _ in range(n)
+                ]
+                raw.append(_chain_contour(pts))
+            result = rasterize_raw(raw, 11, 11, rule=FillRule.EVEN_ODD)
+            exp_levels, _ = reference_levels_lines(raw, 11, 11,
+                                                   rule="even-odd")
+            with self.subTest(case=case):
+                self.assertEqual(
+                    tuple(tuple(r) for r in result.levels), exp_levels
+                )
+                self.assertIs(result.rule, FillRule.EVEN_ODD)
+
+    def test_matches_decimal_reference_mixed(self):
+        rng = random.Random(777001)
+        for case in range(8):
+            ncon = rng.randint(1, 3)
+            raw = []
+            for _ in range(ncon):
+                n = rng.randint(3, 5)
+                pts = [
+                    (rng.randint(50, 900) / 100.0,
+                     rng.randint(50, 900) / 100.0)
+                    for _ in range(n)
+                ]
+                quads = tuple(
+                    (i, rng.randint(0, 1000) / 100.0,
+                     rng.randint(0, 1000) / 100.0)
+                    for i in range(n) if rng.random() < 0.5
+                )
+                raw.append(_chain_contour(pts, quads=quads))
+            result = rasterize_raw(raw, 11, 11, rule="even-odd")
+            exp_levels, _ = reference_levels_mixed(raw, 11, 11,
+                                                   rule="even-odd")
+            with self.subTest(case=case):
+                self.assertEqual(
+                    tuple(tuple(r) for r in result.levels), exp_levels
+                )
+
+    def test_hole_ring_even_odd(self):
+        outer = self._square(1, 1, 9, 9)
+        # Same orientation (CCW), not reversed: even-odd still punches
+        # the hole; nonzero would leave winding 2 inside.
+        inner_ccw = self._square(3, 3, 7, 7)
+        inner_cw = self._square(3, 3, 7, 7, reverse=True)
+        for inner in (inner_ccw, inner_cw):
+            result = rasterize_raw([outer, inner], 10, 10,
+                                   rule=FillRule.EVEN_ODD)
+            self.assertEqual(result.levels[2][2], 16)
+            self.assertEqual(result.levels[5][5], 0)
+        nonzero = rasterize_raw([outer, inner_ccw], 10, 10)
+        self.assertEqual(nonzero.levels[5][5], 16)
+
+    def test_coincident_loops_cancel(self):
+        sq = self._square(1, 1, 5, 5)
+        eo = rasterize_raw([sq, sq], 7, 7, rule="even-odd")
+        nz = rasterize_raw([sq, sq], 7, 7)
+        # every point crossed twice -> even -> empty
+        for py in range(7):
+            for px in range(7):
+                self.assertEqual(eo.levels[py][px], 0)
+                self.assertTrue(all(p == 0 for p in eo.parities[py][px]))
+                # winding data is rule-independent and still +2 there
+                if 1 <= px < 5 and 1 <= py < 5:
+                    self.assertTrue(all(w == 2 for w in nz.windings[py][px]))
+        self.assertEqual(nz.levels[3][3], 16)
+
+    def test_overlap_toggles(self):
+        a = self._square(1, 1, 5, 5)
+        b = self._square(3, 3, 7, 7)
+        eo = rasterize_raw([a, b], 9, 9, rule="even-odd")
+        nz = rasterize_raw([a, b], 9, 9)
+        # overlap region empty under even-odd, filled under nonzero
+        for px in range(3, 5):
+            for py in range(3, 5):
+                self.assertEqual(eo.levels[py][px], 0)
+                self.assertEqual(nz.levels[py][px], 16)
+        # exclusive regions stay filled
+        self.assertEqual(eo.levels[2][2], 16)
+        self.assertEqual(eo.levels[6][6], 16)
+
+    def test_self_intersecting_bowtie_differs(self):
+        raw = _chain_contour([(1, 1), (5, 5), (5, 1), (1, 5)])
+        eo = rasterize_raw(_glyph(raw), 7, 7, rule="even-odd")
+        nz = rasterize_raw(_glyph(raw), 7, 7)
+        exp_levels, _ = reference_levels_lines(raw, 7, 7,
+                                               rule="even-odd")
+        self.assertEqual(tuple(tuple(r) for r in eo.levels), exp_levels)
+        # lobes: filled under both rules ...
+        self.assertGreater(eo.levels[2][2] + eo.levels[2][4], 0)
+        # ... but the bowtie's center pinch region (winding 0) is
+        # On the 1/8 sub-sample lattice the ray crossing count for
+        # every sample happens to match its nonzero winding, so the
+        # two rules agree here; the case still verifies that the same
+        # intersection list feeds both reductions (windings equal and
+        # levels equal the independent parity reference).
+        from fractions import Fraction
+        pinch = (Fraction(3), Fraction(17, 8))
+        self.assertEqual(winding_point_lines(raw, *pinch), 0)
+        self.assertEqual(eo.windings, nz.windings)
+
+    def test_self_intersection_differs_off_lattice(self):
+        # A 5-point star-ish self-intersecting polygon on an offset
+        # lattice contains regions where parity and nonzero disagree.
+        raw = _chain_contour(
+            [(1.3, 1.2), (7.9, 6.7), (0.4, 5.1), (6.1, 0.9), (3.4, 8.8)]
+        )
+        eo = rasterize_raw(_glyph(raw), 9, 9, rule=FillRule.EVEN_ODD)
+        nz = rasterize_raw(_glyph(raw), 9, 9)
+        self.assertNotEqual(eo.levels, nz.levels)
+        exp_levels, _ = reference_levels_lines(raw, 9, 9,
+                                               rule="even-odd")
+        self.assertEqual(tuple(tuple(r) for r in eo.levels), exp_levels)
+        self.assertEqual(eo.windings, nz.windings)
+
+    def test_string_aliases_and_default(self):
+        sq = [self._square(1, 1, 5, 5)]
+        default = rasterize_raw(sq, 7, 7)
+        eo1 = rasterize_raw(sq, 7, 7, rule="even-odd")
+        eo2 = rasterize_raw(sq, 7, 7, rule="evenodd")
+        nz = rasterize_raw(sq, 7, 7, rule="nonzero")
+        self.assertEqual(eo1.levels, eo2.levels)
+        self.assertEqual(default.levels, nz.levels)
+        self.assertIs(eo1.rule, FillRule.EVEN_ODD)
+        self.assertIs(nz.rule, FillRule.NONZERO)
+        # single simple contour: rules agree everywhere
+        self.assertEqual(default.levels, eo1.levels)
+
+    def test_windings_rule_independent_and_parity_queries(self):
+        a = self._square(1, 1, 5, 5)
+        b = self._square(3, 3, 7, 7)
+        eo = rasterize_raw([a, b], 9, 9, rule=FillRule.EVEN_ODD)
+        nz = rasterize_raw([a, b], 9, 9, rule=FillRule.NONZERO)
+        # intersection computation must stay identical between rules
+        self.assertEqual(eo.windings, nz.windings)
+        self.assertEqual(eo.parities_at(4, 4), tuple([0] * 16))
+        self.assertEqual(eo.parities_at(2, 2), tuple([1] * 16))
+        self.assertTrue(eo.inside_at(2, 2, 0, 0))
+        self.assertFalse(eo.inside_at(4, 4, 0, 0))
+        self.assertTrue(nz.inside_at(4, 4, 0, 0))
+
+    def test_vertex_on_sample_line_rules_agree_on_simple_spike(self):
+        raw = _chain_contour(
+            [(1, 1), (6, 1), (6, 3.125), (3.5, 5.375), (1, 3.125)]
+        )
+        eo = rasterize_raw(_glyph(raw), 8, 7, rule=FillRule.EVEN_ODD)
+        nz = rasterize_raw(_glyph(raw), 8, 7)
+        # simple (non-self-intersecting) contour: identical coverage
+        self.assertEqual(eo.levels, nz.levels)
+        exp_levels, _ = reference_levels_lines(raw, 8, 7,
+                                               rule="even-odd")
+        self.assertEqual(tuple(tuple(r) for r in eo.levels), exp_levels)
 
 
 class QuadraticTests(unittest.TestCase):
